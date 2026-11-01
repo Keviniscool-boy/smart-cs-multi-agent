@@ -111,7 +111,7 @@ export default function AfterSales() {
         </form>}
         <h3>退款申请</h3>
         <div className="after-sales-list">
-          {refunds.map((refund) => <article className="after-sales-row" key={refund.id}>
+          {refunds.map((refund) => <article className="after-sales-row" key={refund.id} data-status={refund.ticket_status === "processing" ? "need_info" : refund.status}>
             <div><strong>{refund.ticket_status === "processing" ? "待补充信息" : refundStatus[refund.status] || refund.status}</strong><p>{refund.id}</p><span>订单 {refund.order_id}</span><p>{refund.reason}</p>{refund.ticket_status === "processing" && <p>客服要求：{refund.requested_info}</p>}</div>
             {refund.status === "pending_review" && <div className="after-sales-actions">{refund.ticket_status === "processing" && <button type="button" className="text-button" disabled={busy} onClick={() => { setInformationId(refund.id); setInformation(""); }}>补充信息</button>}<button className="text-button" disabled={busy} onClick={() => cancel(refund.id)}>撤回申请</button></div>}
             {refund.status === "cancelled" && refund.resume_status && refund.resume_status !== "done" && <button type="button" className="text-button" disabled={busy} onClick={() => cancel(refund.id)}>重试会话恢复</button>}
