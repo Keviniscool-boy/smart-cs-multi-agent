@@ -179,7 +179,7 @@ async def csrf_origin_check(request, call_next):
         if origin and origin.rstrip("/") not in _CORS_ORIGINS_SET:
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Origin not allowed"},
+                content={"detail": "请求来源不在允许列表内"},
             )
     return await call_next(request)
 
@@ -285,7 +285,7 @@ def _check_login_rate_limit(client_ip: str, username: str) -> None:
             if count > LOGIN_MAX_ATTEMPTS:
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Too many login attempts, please retry later",
+                    detail="登录尝试过于频繁，请稍后再试",
                 )
             return
         except HTTPException:
@@ -301,7 +301,7 @@ def _check_login_rate_limit(client_ip: str, username: str) -> None:
     if len(attempts) >= LOGIN_MAX_ATTEMPTS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts, please retry later",
+            detail="登录尝试过于频繁，请稍后再试",
         )
     attempts.append(now)
 
@@ -321,10 +321,10 @@ async def call_tool(
 ):
     """调用 MCP 工具，仅允许已登录用户调用。"""
     if request.name not in {"order_query", "order_list", "refund_apply", "ticket_create", "knowledge_search", "risk_check"}:
-        raise HTTPException(status_code=400, detail="Unsupported tool")
+        raise HTTPException(status_code=400, detail="不支持的工具调用")
     arguments = dict(request.arguments)
     if request.name == "refund_apply" and arguments.get("session_id"):
-        raise HTTPException(status_code=400, detail="Session is assigned by the server")
+        raise HTTPException(status_code=400, detail="会话身份由服务端分配，不能自行指定")
     if request.name == "refund_apply":
         arguments.pop("session_id", None)
     if request.name in {"order_query", "order_list", "refund_apply", "risk_check"}:
@@ -614,7 +614,7 @@ async def _prepare_chat(
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     """校验会话归属、组装初始状态，chat 与 chat/stream 共用。"""
     if graph is None:
-        raise HTTPException(status_code=503, detail="System is initializing")
+        raise HTTPException(status_code=503, detail="系统正在初始化，请稍候")
 
     session_id = request.session_id or str(uuid.uuid4())
     if (
@@ -622,10 +622,10 @@ async def _prepare_chat(
         and session_exists(session_id)
         and not user_owns_session(session_id, current_user["id"])
     ):
-        raise HTTPException(status_code=403, detail="Session does not belong to user")
+        raise HTTPException(status_code=403, detail="会话不属于当前用户")
     save_session_owner(session_id, current_user["id"])
     if not user_owns_session(session_id, current_user["id"]):
-        raise HTTPException(status_code=403, detail="Session does not belong to user")
+        raise HTTPException(status_code=403, detail="会话不属于当前用户")
     config = {"configurable": {"thread_id": session_id}}
     if await asyncio.to_thread(has_pending_handoff, session_id, current_user["id"]):
         raise HTTPException(status_code=409, detail="人工审核结果正在恢复，请稍后重试")
@@ -733,7 +733,7 @@ async def _chat_locked(request: ChatRequest, current_user: dict):
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail="Agent processing failed",
+            detail="Agent 处理失败，请稍后重试",
         ) from exc
 
     return await _finalize_chat(
@@ -804,7 +804,7 @@ async def chat_stream(
                         }
                     )
         except Exception:
-            yield _sse({"event": "error", "message": "Agent processing failed"})
+            yield _sse({"event": "error", "message": "Agent 处理失败，请稍后重试"})
             return
 
         if (
@@ -812,7 +812,7 @@ async def chat_stream(
             and "fallback" not in merged
             and not interrupted
         ):
-            yield _sse({"event": "error", "message": "Agent processing failed"})
+            yield _sse({"event": "error", "message": "Agent 处理失败，请稍后重试"})
             return
 
         result = {
@@ -871,7 +871,7 @@ async def get_history(
     current_user: dict = Depends(get_current_user),
 ):
     if not user_owns_session(session_id, current_user["id"]):
-        raise HTTPException(status_code=403, detail="Session does not belong to user")
+        raise HTTPException(status_code=403, detail="会话不属于当前用户")
     history = await _session_history(session_id, current_user["id"])
     return {"session_id": session_id, "messages": history}
 
@@ -918,15 +918,15 @@ async def register(request: AuthRequest, response: Response):
     if len(username) < 3 or len(request.password) < 6:
         raise HTTPException(
             status_code=400,
-            detail="Username must have 3+ characters and password 6+ characters",
+            detail="用户名至少 3 个字符，密码至少 6 位",
         )
     if get_user_by_username(username) is not None:
-        raise HTTPException(status_code=409, detail="Username already exists")
+        raise HTTPException(status_code=409, detail="用户名已存在")
 
     try:
         user = create_user(username, request.password)
     except Exception as exc:
-        raise HTTPException(status_code=409, detail="Username already exists") from exc
+        raise HTTPException(status_code=409, detail="用户名已存在") from exc
 
     token = create_access_token(user["id"], user["username"])
     set_auth_cookie(response, token)
@@ -947,7 +947,7 @@ async def login(request: AuthRequest, http_request: Request, response: Response)
     if row is None or not verify_password(request.password, row["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
+            detail="用户名或密码错误",
         )
 
     user = {

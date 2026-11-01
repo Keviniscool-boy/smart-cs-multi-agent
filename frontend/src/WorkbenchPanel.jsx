@@ -92,7 +92,7 @@ export default function WorkbenchPanel() {
       <h3>退款申请</h3>
       <div className="after-sales-list">
         {refunds.map((refund) => (
-          <article className={`after-sales-row ${detail?.refund.id === refund.id ? "active" : ""}`} key={refund.id}>
+          <article className={`after-sales-row ${detail?.refund.id === refund.id ? "active" : ""}`} key={refund.id} data-status={refund.status}>
             <button className="text-button" onClick={() => openDetail(refund.id)}>
               <strong>{refundStatus[refund.status] || refund.status}</strong>
               <p>{refund.id}</p>

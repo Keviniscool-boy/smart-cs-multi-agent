@@ -17,7 +17,7 @@ def main():
     init_database()
     user = set_user_role(args.username, "admin")
     if user is None:
-        parser.error("Account not found")
+        parser.error("账号不存在：请先用该用户名注册普通账号")
     print(f"Administrator role granted to {user['username']}")
 
 
