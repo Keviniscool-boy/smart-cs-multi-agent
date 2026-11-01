@@ -132,6 +132,7 @@ class TicketHandlerAgent:
             # AttributeError：测试/降级场景 mcp_client 为 None，直接走本地工具。
             available_tools = await local_mcp_server.list_tools()
             use_local = True
+        # 从 LLM 可见参数中剔除服务端注入字段（user_id/session_id 等），防伪造身份与幂等键。
         llm_tools = [
             {
                 "type": "function",
@@ -243,8 +244,8 @@ class TicketHandlerAgent:
                 }
                 break
 
-        # Once the request exists, reach the durable interrupt without another
-        # model call that could fail and strand the request.
+        # 退款单已落库，直接进入持久化中断，不再做第二次模型调用——
+        # 模型调用一旦失败，申请就会无人认领。
         final_response = (
             AIMessage(content="您的退款申请已提交人工审核，客服处理后将继续为您跟进。")
             if pending_handoff else await llm_with_tools.ainvoke(messages)
@@ -254,6 +255,7 @@ class TicketHandlerAgent:
             "messages": [response, *tool_messages, final_response],
             "final_response": final_response.content,
             "pending_handoff": pending_handoff,
+            # 等待话术未经模型审查，如实标记合规状态，避免下游当作已审内容。
             **({"compliance_passed": False, "compliance_reason": "固定系统等待话术，未执行模型审查"} if pending_handoff else {}),
             "sub_results": {
                 **state.get("sub_results", {}),

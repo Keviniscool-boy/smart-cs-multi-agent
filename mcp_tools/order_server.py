@@ -38,9 +38,6 @@ async def order_list(user_id: str = "", request_id: str = "") -> dict:
 async def refund_apply(order_id: str, reason: str, user_id: str = "", request_id: str = "", idempotency_key: str = "", session_id: str = "") -> dict:
     return await asyncio.to_thread(apply_refund, user_id, order_id, reason, idempotency_key, session_id)
 
-#knowledge_search 
-#输入查询问题，返回多个知识分段
-
 @server.tool(
     name="knowledge_search",
     description="搜索企业知识库，返回相关文档片段（mock 模板数据，演示用）",
@@ -59,8 +56,6 @@ async def knowledge_search(
     ]
 
 
-#ticket_create
-#输入用户问题，创建工单，返回工单ID
 @server.tool(
     name="ticket_create",
     description="创建工单，返回工单ID",
@@ -81,8 +76,6 @@ async def ticket_create(
         idempotency_key=idempotency_key or request_id,
     )
 
-#risk_check
-#输入用户问题，进行风险检查，返回风险等级和建议
 @server.tool(
     name="risk_check",
     description="检查交易操作的风险等级（演示实现：仅按金额阈值）",

@@ -31,8 +31,8 @@ class AgentState(TypedDict):
     compliance_reason: str
     compliance_retries: int
     sub_results: dict[str, Any]
-    # 阶段二：业务工具创建了待人工审核的售后单时，由 ticket_handler 填充，
-    # 固定等待话术后进入 human_review 节点暂停等待客服决定。
+    # 业务工具创建了待人工审核的售后单时由 ticket_handler 填充；
+    # 有值时 ticket_handler 直接转入 human_review 暂停（绕过合规，见 create_supervisor_graph）。
     pending_handoff: dict[str, Any]
     # 客服通过 Command(resume=...) 恢复时写入的决定。
     handoff_decision: dict[str, Any]
@@ -341,6 +341,8 @@ def create_supervisor_graph(
     )
 
     graph.add_edge("knowledge_rag", "compliance_checker")
+    # 退款流程绕过合规：建单到持久化中断之间不再有模型调用，杜绝申请搁浅；
+    # 该链路所有用户可见文本均为固定话术，恢复后经 synthesize 收尾。
     graph.add_conditional_edges(
         "ticket_handler",
         lambda state: "human_review" if state.get("pending_handoff") else "compliance_checker",

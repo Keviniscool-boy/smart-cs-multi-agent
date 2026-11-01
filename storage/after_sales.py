@@ -72,7 +72,7 @@ def _connect():
             PRIMARY KEY(user_id, request_key)
         );
     """)
-    # Older databases need a session association for the handoff workflow.
+    # 存量库补 session_id 列：人工恢复流程需要退款单关联会话线程。
     columns = {row["name"] for row in db.execute("PRAGMA table_info(refund_requests)")}
     if "session_id" not in columns:
         try:

@@ -391,7 +391,11 @@ def add_refund_information(refund_id: str, request: RefundInformationRequest, cu
 
 
 async def _resume_handoff(refund_id: str) -> dict:
-    """Resume only a matching checkpoint; failures leave a durable retry record."""
+    """通过 outbox 认领待恢复事件：三重校验通过后才 Command 恢复图执行。
+
+    校验失败或图执行失败都释放租约回 pending（可重试），成功则写入答复
+    并标记 done。只恢复与本退款单、本用户匹配的检查点。
+    """
     event = await asyncio.to_thread(claim_handoff, refund_id)
     if not event:
         return {"resumed": False, "response": "", "pending": False}
@@ -412,6 +416,7 @@ async def _resume_handoff(refund_id: str) -> dict:
         state = await graph.aget_state(config)
         values = state.values or {}
         handoff = values.get("pending_handoff") or {}
+        # 恢复前三重校验：会话归属 / 检查点 user_id / 暂停信号与退款单一致。
         if values.get("user_id") != event["user_id"] or handoff.get("refund_id") != refund_id:
             raise RuntimeError("Checkpoint does not match refund")
         interrupts = [item for task in state.tasks for item in task.interrupts]
@@ -438,6 +443,7 @@ async def _resume_handoff(refund_id: str) -> dict:
 
 
 async def _session_history(session_id: str, user_id: str, last_n: int | None = None):
+    """合并会话消息与售后通知（客服追问、恢复答复），按时间排序。"""
     history = await short_term_memory.get_history(session_id)
     notices = await asyncio.to_thread(list_handoff_messages, session_id, user_id)
     combined = [*history, *notices]
@@ -545,6 +551,7 @@ async def decide_refund(
 
 @app.post("/api/workbench/refunds/{refund_id}/resume")
 async def retry_refund_resume(refund_id: str, operator: dict = Depends(require_role("agent", "admin"))):
+    """手动重试恢复：租约过期或此前失败的决定，重新推给图执行。"""
     if await asyncio.to_thread(get_refund_review, refund_id) is None:
         raise HTTPException(status_code=404, detail="退款申请不存在")
     return await _resume_handoff(refund_id)
@@ -552,7 +559,8 @@ async def retry_refund_resume(refund_id: str, operator: dict = Depends(require_r
 
 @app.post("/api/workbench/refunds/{refund_id}/prepare")
 async def retry_handoff_preparation(refund_id: str, operator: dict = Depends(require_role("agent", "admin"))):
-    """Rebuild the pause only when a committed refund's ticket node was interrupted."""
+    """仅当已落库退款单停在 ticket_handler 检查点（建单后、暂停前中断）时，重建人工审核暂停。"""
+    # 做法：把 pending_handoff 以 ticket_handler 名义写回检查点，再 ainvoke(None) 走到中断。
     review = await asyncio.to_thread(get_refund_review, refund_id)
     if review is None:
         raise HTTPException(status_code=404, detail="退款申请不存在")
@@ -624,8 +632,10 @@ async def _prepare_chat(
     ):
         raise HTTPException(status_code=403, detail="会话不属于当前用户")
     save_session_owner(session_id, current_user["id"])
+    # INSERT OR IGNORE 不会覆盖他人归属；重复校验兜住检查与保存之间的并发窗口。
     if not user_owns_session(session_id, current_user["id"]):
         raise HTTPException(status_code=403, detail="会话不属于当前用户")
+    # 三层暂停防护：outbox 未完成 / 会话有待审申请 / 检查点仍有中断点。
     config = {"configurable": {"thread_id": session_id}}
     if await asyncio.to_thread(has_pending_handoff, session_id, current_user["id"]):
         raise HTTPException(status_code=409, detail="人工审核结果正在恢复，请稍后重试")
@@ -717,6 +727,7 @@ async def chat(
 ):
     request.session_id = request.session_id or str(uuid.uuid4())
     token = uuid.uuid4().hex
+    # 同会话轮锁：并发消息会踩踏暂停线程，这里串行化处理。
     if not await asyncio.to_thread(claim_session_turn, request.session_id, token):
         raise HTTPException(status_code=409, detail="会话正在处理其他请求，请稍后重试")
     try:
@@ -775,6 +786,7 @@ async def chat_stream(
     try:
         session_id, initial_state, config = await _prepare_chat(request, current_user)
     except BaseException:
+        # 用 BaseException：客户端断开（CancelledError）也必须释放轮锁。
         await asyncio.to_thread(release_session_turn, request.session_id, token)
         raise
 
@@ -841,6 +853,7 @@ async def chat_stream(
 
     async def locked_stream():
         stream = event_stream()
+        # 整体 120s 超时兜底；超时或客户端断开都要释放轮锁。
         deadline = asyncio.get_running_loop().time() + 120
         try:
             while True:
@@ -851,7 +864,7 @@ async def chat_stream(
                     break
                 yield event
         except asyncio.TimeoutError:
-            yield _sse({"event": "error", "message": "Agent processing timed out"})
+            yield _sse({"event": "error", "message": "Agent 处理超时，请稍后重试"})
         finally:
             try:
                 await stream.aclose()

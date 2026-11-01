@@ -92,7 +92,7 @@ def init_tracer(
     service_name: str = "smart-cs-python-rebuild",
     otlp_endpoint: str | None = None,
 ) -> None:
-    """Initialize OpenTelemetry and choose Jaeger or console export."""
+    """初始化 OpenTelemetry，按配置选择 Jaeger 或控制台导出。"""
     global _tracer
 
     if not _HAS_OTEL:
@@ -101,7 +101,7 @@ def init_tracer(
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
 
-    # Jaeger exposes an OTLP gRPC endpoint on port 4317.
+    # Jaeger 在 4317 端口暴露 OTLP gRPC 接收端。
     if otlp_endpoint:
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
@@ -120,7 +120,7 @@ def init_tracer(
 
 
 def get_tracer():
-    """Return the global tracer, or None when tracing is unavailable."""
+    """返回全局 tracer；未启用 tracing 时返回 None。"""
     global _tracer
 
     if not _HAS_OTEL:
@@ -138,7 +138,7 @@ def get_metrics() -> AgentMetrics:
 
 
 def trace_agent_call(agent_name: str) -> Callable:
-    """Create a decorator that records one Agent method call."""
+    """创建记录 Agent 方法调用的装饰器。"""
 
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
