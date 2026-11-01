@@ -953,6 +953,7 @@ async def login(request: AuthRequest, http_request: Request, response: Response)
     user = {
         "id": row["id"],
         "username": row["username"],
+        "role": row["role"],
         "created_at": row["created_at"],
     }
     token = create_access_token(user["id"], user["username"])
