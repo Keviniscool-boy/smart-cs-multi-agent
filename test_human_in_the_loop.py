@@ -818,3 +818,32 @@ def test_pending_outbox_survives_restart_and_resumes_once(api, monkeypatch, tmp_
             await conn2.close()
 
     asyncio.run(scenario())
+
+
+def test_login_and_register_responses_include_role(isolated_db, monkeypatch):
+    """登录/注册响应必须带 role——否则前端登录后看不到客服工作台入口。"""
+    from auth.database import init_database, set_user_role
+
+    monkeypatch.setenv("AUTH_DATABASE_PATH", str(isolated_db.parent / "app.db"))
+    monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-for-role-payload-check")
+    import importlib
+
+    from auth import database as auth_db
+
+    importlib.reload(auth_db)
+    auth_db.init_database()
+    auth_db.create_user("role_check_user", "Secret#123")
+    set_user_role("role_check_user", "agent")
+
+    monkeypatch.setenv("AUTH_DATABASE_PATH", str(isolated_db.parent / "app.db"))
+    importlib.reload(auth_db)
+    api_main_reloaded = importlib.reload(api_main)
+    client = TestClient(api_main_reloaded.app)
+
+    login = client.post("/api/auth/login", json={"username": "role_check_user", "password": "Secret#123"})
+    assert login.status_code == 200
+    assert login.json()["user"]["role"] == "agent", "登录响应必须包含实时角色"
+
+    reg = client.post("/api/auth/register", json={"username": "role_check_new", "password": "Secret#123"})
+    assert reg.status_code in (200, 201)
+    assert reg.json()["user"]["role"] == "user"
