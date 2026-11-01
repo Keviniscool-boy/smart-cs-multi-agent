@@ -75,7 +75,7 @@ def get_current_user(
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
+            detail="请先登录",
         )
 
     try:
@@ -91,7 +91,7 @@ def get_current_user(
     except (jwt.InvalidTokenError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail="登录已过期，请重新登录",
         ) from exc
 
     # 阶段二：角色实时读库而不是信任 JWT 载荷——
@@ -106,7 +106,7 @@ def get_current_user(
         # token 有效但用户已从库中删除：视为认证失效。
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail="登录已过期，请重新登录",
         )
 
     return {"id": user_id, "username": username, "role": role}
@@ -119,7 +119,7 @@ def require_role(*roles: str):
         if current_user.get("role") not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient role",
+                detail="权限不足，无法执行该操作",
             )
         return current_user
 
