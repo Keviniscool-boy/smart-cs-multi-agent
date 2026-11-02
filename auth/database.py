@@ -43,6 +43,22 @@ def init_database() -> None:
                 jti TEXT PRIMARY KEY,
                 expires_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS admin_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                action TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                actor_id TEXT NOT NULL DEFAULT '',
+                target_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                trace_id TEXT NOT NULL DEFAULT '',
+                duration_ms REAL,
+                detail TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_admin_events_trace ON admin_events(trace_id, id);
+            CREATE INDEX IF NOT EXISTS idx_admin_events_created ON admin_events(created_at, id);
             """
         )
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
@@ -105,17 +121,44 @@ def get_user_by_id(user_id: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def set_user_role(username: str, role: str) -> sqlite3.Row | None:
-    """admin 授权入口；角色白名单由调用方校验。"""
+def set_user_role(username: str, role: str, actor_id: str = "bootstrap") -> sqlite3.Row | None:
+    """Change a role and record the change in the same transaction."""
+    if role not in {"user", "agent", "admin"}:
+        raise ValueError("invalid_role")
     with _connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT id, username, role, created_at FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if existing is None:
+            return None
+        if existing["role"] == "admin" and role != "admin":
+            count = connection.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0]
+            if count <= 1:
+                raise ValueError("last_admin")
+        if existing["role"] == role:
+            return existing
         connection.execute(
             "UPDATE users SET role = ? WHERE username = ?",
             (role, username),
+        )
+        connection.execute(
+            "INSERT INTO admin_events (created_at, kind, action, outcome, actor_id, target_id, detail) VALUES (?, 'role', 'role_changed', 'success', ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), actor_id, existing["id"], f"{existing['role']}->{role}"),
         )
         return connection.execute(
             "SELECT id, username, role FROM users WHERE username = ?",
             (username,),
         ).fetchone()
+
+
+def list_users(limit: int = 100, offset: int = 0) -> list[dict]:
+    with _connection() as connection:
+        rows = connection.execute(
+            "SELECT id, username, role, created_at FROM users ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def get_usernames_by_ids(user_ids: list[str]) -> dict[str, str]:

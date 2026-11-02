@@ -8,6 +8,7 @@ import {
 import { API_URL, api, logout, INTENT_CLASS, INTENT_LABELS } from "./api.js";
 import AfterSales from "./AfterSales.jsx";
 import WorkbenchPanel from "./WorkbenchPanel.jsx";
+import AdminPanel from "./AdminPanel.jsx";
 
 function formatMeta(value, fallback = "—") {
   if (value === null || value === undefined || value === "") return fallback;
@@ -147,6 +148,7 @@ export default function ChatView({ user, onLogout }) {
   const [showOps, setShowOps] = useState(false);
   const [showAfterSales, setShowAfterSales] = useState(false);
   const [showWorkbench, setShowWorkbench] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
   const isAgent = user.role === "agent" || user.role === "admin";
   const [showNav, setShowNav] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
@@ -283,17 +285,18 @@ export default function ChatView({ user, onLogout }) {
           在线
         </div>
         <div className="user-menu">
+          {user.role === "admin" && <button className="text-button inverse" onClick={() => { setShowAfterSales(false); setShowWorkbench(false); setShowAdmin(v => !v); }}>{showAdmin ? "返回会话" : "管理员"}</button>}
           {isAgent && (
             <button
               className="text-button inverse"
-              onClick={() => { setShowAfterSales(false); setShowWorkbench((v) => !v); }}
+              onClick={() => { setShowAdmin(false); setShowAfterSales(false); setShowWorkbench((v) => !v); }}
             >
               {showWorkbench ? "返回会话" : "客服工作台"}
             </button>
           )}
           <button
             className="text-button inverse"
-            onClick={() => { setShowWorkbench(false); setShowAfterSales((v) => !v); }}
+            onClick={() => { setShowAdmin(false); setShowWorkbench(false); setShowAfterSales((v) => !v); }}
           >
             {showAfterSales ? "返回会话" : "订单售后"}
           </button>
@@ -354,7 +357,7 @@ export default function ChatView({ user, onLogout }) {
           </div>
         </aside>
 
-        {showWorkbench && isAgent ? <WorkbenchPanel /> : showAfterSales ? <AfterSales /> : <section className="chat-panel">
+        {showAdmin && user.role === "admin" ? <AdminPanel /> : showWorkbench && isAgent ? <WorkbenchPanel /> : showAfterSales ? <AfterSales /> : <section className="chat-panel">
           <div className="chat-heading">
             <div>
               <p className="eyebrow">SUPERVISOR AGENT</p>

@@ -12,7 +12,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request, Response
-from fastapi import Depends, status
+from fastapi import Depends, Query, status
 import jwt
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -45,7 +45,7 @@ from auth.security import (
     require_role,
     set_auth_cookie,
 )
-from auth.database import set_user_role
+from auth.database import set_user_role, list_users
 from mcp_client.client import MCPClient
 from mcp_tools.order_server import server as mcp_server
 from memory.long_term import LongTermMemory
@@ -54,6 +54,7 @@ from memory.working_memory import WorkingMemory
 from langgraph.types import Command
 from storage.mysql_store import mysql_store
 from storage.after_sales import (
+    admin_refunds, admin_refund_counts, admin_business_events,
     apply_refund,
     cancel_refund,
     claim_handoff,
@@ -76,6 +77,7 @@ from storage.after_sales import (
     record_refund_decision,
 )
 from tracing.otel_config import get_metrics, init_tracer, trace_agent_call
+from tracing.admin_audit import trace_scope, list_events, list_runs
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -379,7 +381,7 @@ async def cancel_refund_request(refund_id: str, current_user: dict = Depends(get
         code = 404 if result["error"] == "refund_not_found" else 409
         raise HTTPException(status_code=code, detail=result)
     if result.get("session_id"):
-        resume = await _resume_handoff(refund_id)
+        resume = await _resume_handoff(refund_id, current_user["id"])
         result["resume_pending"] = resume["pending"]
     return result
 
@@ -393,7 +395,7 @@ def add_refund_information(refund_id: str, request: RefundInformationRequest, cu
     return result
 
 
-async def _resume_handoff(refund_id: str) -> dict:
+async def _resume_handoff(refund_id: str, actor_id: str = "") -> dict:
     """通过 outbox 认领待恢复事件：三重校验通过后才 Command 恢复图执行。
 
     校验失败或图执行失败都释放租约回 pending（可重试），成功则写入答复
@@ -427,11 +429,13 @@ async def _resume_handoff(refund_id: str) -> dict:
             if not any(isinstance(item.value, dict) and item.value.get("refund_id") == refund_id and item.value.get("user_id") == event["user_id"] for item in interrupts):
                 raise RuntimeError("Interrupt does not match refund")
             decision = {"action": event["action"], "note": event["note"], "operator": event["operator"]}
-            result = await asyncio.wait_for(graph.ainvoke(Command(resume=decision), config=config), timeout=120)
+            with trace_scope(uuid.uuid4().hex, actor_id, event["session_id"]):
+                result = await asyncio.wait_for(graph.ainvoke(Command(resume=decision), config=config), timeout=120)
         else:
             if (values.get("handoff_decision") or {}).get("action") != event["action"]:
                 raise RuntimeError("Checkpoint has no matching decision")
-            result = await asyncio.wait_for(graph.ainvoke(None, config=config), timeout=120) if state.next else values
+            with trace_scope(uuid.uuid4().hex, actor_id, event["session_id"]):
+                result = await asyncio.wait_for(graph.ainvoke(None, config=config), timeout=120) if state.next else values
         response = result.get("final_response") or "人工审核已完成。"
         if not await asyncio.to_thread(finish_handoff, event["id"], token, response):
             raise RuntimeError("Resume lease expired")
@@ -541,7 +545,7 @@ async def decide_refund(
     resumed = {"resumed": False, "response": "", "pending": False}
     session_id = review.get("session_id") or ""
     if session_id and request.action != "need_info":
-        resumed = await _resume_handoff(refund_id)
+        resumed = await _resume_handoff(refund_id, operator["id"])
 
     return {
         "refund": result,
@@ -557,7 +561,7 @@ async def retry_refund_resume(refund_id: str, operator: dict = Depends(require_r
     """手动重试恢复：租约过期或此前失败的决定，重新推给图执行。"""
     if await asyncio.to_thread(get_refund_review, refund_id) is None:
         raise HTTPException(status_code=404, detail="退款申请不存在")
-    return await _resume_handoff(refund_id)
+    return await _resume_handoff(refund_id, operator["id"])
 
 
 @app.post("/api/workbench/refunds/{refund_id}/prepare")
@@ -613,10 +617,44 @@ def grant_user_role(
     """管理员授予/变更角色。角色白名单：user / agent / admin。"""
     if request.role not in {"user", "agent", "admin"}:
         raise HTTPException(status_code=400, detail={"error": "invalid_role", "message": "角色只能是 user、agent 或 admin"})
-    row = set_user_role(request.username, request.role)
+    try:
+        row = set_user_role(request.username, request.role, actor_id=admin["id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="不能移除最后一名管理员") from exc
     if row is None:
         raise HTTPException(status_code=404, detail={"error": "user_not_found", "message": "用户不存在"})
     return {"user": dict(row)}
+
+
+@app.get("/api/admin/users")
+def admin_users(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), admin: dict = Depends(require_role("admin"))):
+    return {"users": list_users(limit, offset)}
+
+
+@app.get("/api/admin/overview")
+def admin_overview(admin: dict = Depends(require_role("admin"))):
+    return admin_refund_counts()
+
+
+@app.get("/api/admin/refunds")
+def admin_refund_list(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), status: str = "", admin: dict = Depends(require_role("admin"))):
+    return {"refunds": admin_refunds(limit, offset, status)}
+
+
+@app.get("/api/admin/runs")
+def admin_run_list(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), admin: dict = Depends(require_role("admin"))):
+    return {"runs": list_runs(limit, offset)}
+
+
+@app.get("/api/admin/runs/{trace_id}")
+def admin_run_detail(trace_id: str, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), admin: dict = Depends(require_role("admin"))):
+    return {"events": list_events(limit, offset, trace_id=trace_id)}
+
+
+@app.get("/api/admin/audit")
+def admin_audit(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=10000), admin: dict = Depends(require_role("admin"))):
+    events = list_events(limit + offset, kind="role") + list_events(limit + offset, kind="compliance") + admin_business_events(limit + offset)
+    return {"events": sorted(events, key=lambda event: event["created_at"], reverse=True)[offset:offset + limit]}
 
 
 async def _prepare_chat(
@@ -734,7 +772,8 @@ async def chat(
     if not await asyncio.to_thread(claim_session_turn, request.session_id, token):
         raise HTTPException(status_code=409, detail="会话正在处理其他请求，请稍后重试")
     try:
-        return await _chat_locked(request, current_user)
+        with trace_scope(uuid.uuid4().hex, current_user["id"], request.session_id):
+            return await _chat_locked(request, current_user)
     finally:
         await asyncio.to_thread(release_session_turn, request.session_id, token)
 
@@ -862,7 +901,8 @@ async def chat_stream(
             while True:
                 remaining = max(0, deadline - asyncio.get_running_loop().time())
                 try:
-                    event = await asyncio.wait_for(stream.__anext__(), timeout=remaining)
+                    with trace_scope(trace_id, current_user["id"], session_id):
+                        event = await asyncio.wait_for(stream.__anext__(), timeout=remaining)
                 except StopAsyncIteration:
                     break
                 yield event
@@ -874,6 +914,7 @@ async def chat_stream(
             finally:
                 await asyncio.to_thread(release_session_turn, session_id, token)
 
+    trace_id = uuid.uuid4().hex
     return StreamingResponse(
         locked_stream(),
         media_type="text/event-stream",
