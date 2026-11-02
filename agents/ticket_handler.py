@@ -212,6 +212,14 @@ class TicketHandlerAgent:
                 fallback_used = True
                 result = await asyncio.to_thread(self._local_tool, tool_name, tool_arguments)
 
+            from tracing.admin_audit import current_trace, record_event
+            audit_context = current_trace()
+            if audit_context:
+                record_event(kind="tool", action=tool_name,
+                             outcome="fallback" if fallback_used else "success",
+                             detail=f"retries={retry_count};error={error_type or 'none'}",
+                             **audit_context)
+
             tool_results.append(
                 {
                     "tool": tool_name,
