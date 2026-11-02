@@ -2,8 +2,10 @@ services:
   mysql:
     image: mysql:8.0
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required - set it in .env (no default, see B4)}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required - set it in .env}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-smart_cs}
+      MYSQL_USER: ${MYSQL_USER:-smart_cs_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required - set it in .env}
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
