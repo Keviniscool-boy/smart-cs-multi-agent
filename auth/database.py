@@ -38,6 +38,11 @@ def init_database() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
+
+            CREATE TABLE IF NOT EXISTS revoked_tokens (
+                jti TEXT PRIMARY KEY,
+                expires_at TEXT NOT NULL
+            );
             """
         )
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
@@ -140,6 +145,27 @@ def user_owns_session(session_id: str, user_id: str) -> bool:
         row = connection.execute(
             "SELECT 1 FROM sessions WHERE session_id = ? AND user_id = ?",
             (session_id, user_id),
+        ).fetchone()
+    return row is not None
+
+
+def revoke_token(jti: str, expires_at: str) -> None:
+    with _connection() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?, ?)",
+            (jti, expires_at),
+        )
+
+
+def is_token_revoked(jti: str) -> bool:
+    with _connection() as connection:
+        connection.execute(
+            "DELETE FROM revoked_tokens WHERE expires_at < ?",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        row = connection.execute(
+            "SELECT 1 FROM revoked_tokens WHERE jti = ?",
+            (jti,),
         ).fetchone()
     return row is not None
 

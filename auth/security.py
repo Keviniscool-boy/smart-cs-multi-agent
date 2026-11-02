@@ -1,4 +1,5 @@
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -9,20 +10,24 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 JWT_ALGORITHM = "HS256"
 bearer_scheme = HTTPBearer(auto_error=False)
 # B10：token 同时以 httpOnly Cookie 下发（前端不再用 localStorage）。
-# SameSite=Strict 抵御 CSRF；secure 由 COOKIE_SECURE 控制（本地 http
-# 环境为 false，生产 https 必须置 true）。
+# SameSite=Strict 抵御 CSRF；生产环境默认启用 Secure，本地 http
+# 开发环境可显式设置 COOKIE_SECURE=false。
 COOKIE_NAME = "agent_token"
 
 
 def set_auth_cookie(response, token: str) -> None:
-    max_age = int(os.getenv("JWT_EXPIRE_MINUTES", "1440")) * 60
+    max_age = int(os.getenv("JWT_EXPIRE_MINUTES", "60")) * 60
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
         max_age=max_age,
         httponly=True,
         samesite="strict",
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        secure=os.getenv(
+            "COOKIE_SECURE",
+            "true" if os.getenv("APP_ENV", "").lower() == "production" else "false",
+        ).lower()
+        == "true",
         path="/",
     )
 
@@ -57,9 +62,14 @@ def assert_jwt_configured() -> None:
 
 def create_access_token(user_id: str, username: str) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(
-        minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
+        minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
     )
-    payload = {"sub": user_id, "username": username, "exp": expires_at}
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "jti": secrets.token_urlsafe(24),
+        "exp": expires_at,
+    }
     return jwt.encode(payload, require_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
@@ -67,6 +77,7 @@ def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> dict:
+    from auth.database import get_user_by_id, is_token_revoked
     # B10：优先 httpOnly Cookie，回退 Bearer 头（评测脚本/CLI 兼容）。
     if credentials is not None and credentials.scheme.lower() == "bearer":
         token = credentials.credentials
@@ -86,7 +97,8 @@ def get_current_user(
         )
         user_id = payload.get("sub")
         username = payload.get("username")
-        if not user_id or not username:
+        jti = payload.get("jti")
+        if not user_id or not username or not jti or is_token_revoked(jti):
             raise ValueError("missing claims")
     except (jwt.InvalidTokenError, ValueError) as exc:
         raise HTTPException(
@@ -96,8 +108,6 @@ def get_current_user(
 
     # 阶段二：角色实时读库而不是信任 JWT 载荷——
     # 授权/撤销立即生效，不等到 token 过期。
-    from auth.database import get_user_by_id
-
     role = "user"
     user_row = get_user_by_id(user_id)
     if user_row is not None:

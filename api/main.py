@@ -6,13 +6,14 @@ import time
 import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi import Depends, status
+import jwt
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
@@ -28,6 +29,7 @@ from auth.database import (
     create_user,
     get_user_by_username,
     init_database,
+    revoke_token,
     list_user_sessions,
     save_session_owner,
     session_exists,
@@ -39,6 +41,7 @@ from auth.security import (
     clear_auth_cookie,
     create_access_token,
     get_current_user,
+    require_jwt_secret,
     require_role,
     set_auth_cookie,
 )
@@ -947,8 +950,23 @@ async def register(request: AuthRequest, response: Response):
 
 
 @app.post("/api/auth/logout")
-async def logout(response: Response):
-    """B10：登出即清除 httpOnly Cookie。"""
+async def logout(request: Request, response: Response):
+    """清除 Cookie 并撤销当前 JWT，避免登出后令牌继续可用。"""
+    token = request.cookies.get("agent_token")
+    if token:
+        try:
+            payload = jwt.decode(
+                token,
+                require_jwt_secret(),
+                algorithms=["HS256"],
+            )
+            if payload.get("jti") and payload.get("exp"):
+                revoke_token(
+                    payload["jti"],
+                    datetime.fromtimestamp(payload["exp"], timezone.utc).isoformat(),
+                )
+        except (jwt.InvalidTokenError, RuntimeError, ValueError, TypeError):
+            pass
     clear_auth_cookie(response)
     return {"detail": "logged out"}
 
