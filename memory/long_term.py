@@ -2,10 +2,13 @@ import json
 import hashlib
 import logging
 import os
+import re
+from datetime import date
 from pathlib import Path
 
 import faiss
 import numpy as np
+import yaml
 from dotenv import load_dotenv
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_openai import OpenAIEmbeddings
@@ -236,47 +239,64 @@ class LongTermMemory:
         )
 
     async def load_knowledge_base(self, kb_dir: str) -> int:
-        """读取目录中的 txt 文件，切分后加入知识库。"""
+        """Synchronize the index with current eligible files and their metadata."""
         kb_path = Path(kb_dir)
-
-        if not kb_path.exists():
-            return 0
-
-        count = 0
-        existing_contents = {
-            document.get("content", "")
-            for document in self.documents
-        }
-
+        documents = []
+        published_ids = set()
         previous_index = faiss.clone_index(self.index) if self.index is not None else None
         previous_documents = list(self.documents)
         try:
-            for file_path in kb_path.glob("**/*.txt"):
+            for file_path in sorted(kb_path.rglob("*")) if kb_path.exists() else []:
+                if not file_path.is_file() or file_path.suffix.lower() not in {".txt", ".md"}:
+                    continue
                 content = file_path.read_text(encoding="utf-8")
-                chunks = self._chunk_text(content)
-
-                for chunk in chunks:
-                    if chunk in existing_contents:
+                if file_path.suffix.lower() == ".md":
+                    parts = content.split("---", 2)
+                    if len(parts) != 3 or parts[0].strip():
+                        raise ValueError(f"Invalid front matter: {file_path.name}")
+                    metadata = yaml.safe_load(parts[1])
+                    if not isinstance(metadata, dict) or not all(metadata.get(k) for k in ("doc_id", "version", "status")):
+                        raise ValueError(f"Missing policy metadata: {file_path.name}")
+                    if metadata["status"] != "published" or metadata.get("superseded_by"):
                         continue
-
-                    await self._add_document(
-                        content=chunk,
-                        source=file_path.name,
-                        metadata={"file": str(file_path)},
-                    )
-                    existing_contents.add(chunk)
-                    count += 1
-        except EmbeddingUnavailable:
+                    start = date.fromisoformat(str(metadata["effective_date"]))
+                    end = date.fromisoformat(str(metadata["expiration_date"])) if metadata.get("expiration_date") else None
+                    if start > date.today() or (end and end < date.today()):
+                        continue
+                    if metadata["doc_id"] in published_ids:
+                        raise ValueError(f"Multiple active versions: {metadata['doc_id']}")
+                    published_ids.add(metadata["doc_id"])
+                    metadata = {**metadata, "effective_date": start.isoformat(),
+                                "expiration_date": end.isoformat() if end else None,
+                                "file": str(file_path.relative_to(kb_path))}
+                    sections = re.split(r"(?m)^##\s+(.+?)\s*$", parts[2])
+                    for i in range(1, len(sections), 2):
+                        heading, body = sections[i], sections[i + 1].strip()
+                        for chunk in self._chunk_text(body):
+                            source = f"{metadata['doc_id']} v{metadata['version']} §{heading}"
+                            documents.append({"content": chunk, "source": source,
+                                              "metadata": {**metadata, "section": heading}})
+                else:
+                    for chunk in self._chunk_text(content):
+                        documents.append({"content": chunk, "source": file_path.name,
+                                          "metadata": {"file": str(file_path.relative_to(kb_path))}})
+            existing = [{k: doc[k] for k in ("content", "source", "metadata")} for doc in self.documents]
+            if documents == existing and (not documents or self.index is not None):
+                self.index_build_failed = False
+                return 0
+            self.index = None
+            self.documents = []
+            for document in documents:
+                await self._add_document(**document)
+        except (EmbeddingUnavailable, ValueError, TypeError, KeyError, OSError, yaml.YAMLError) as exc:
             self.index = previous_index
             self.documents = previous_documents
             self.index_build_failed = True
-            logger.warning("Knowledge index update failed; restored previous in-memory index")
+            logger.warning("Knowledge index update failed (%s)", type(exc).__name__)
             return 0
-
         self.index_build_failed = False
-        if count:
-            self.save()
-        return count
+        self.save()
+        return len(documents)
 
     @staticmethod
     def _chunk_text(
@@ -336,7 +356,7 @@ class LongTermMemory:
         # FAISS 返回相似度分数和文档在索引中的下标。
         scores, indices = self.index.search(
             query_array,
-            min(top_k, len(self.documents)),
+            len(self.documents),
         )
 
         results = []
@@ -348,8 +368,13 @@ class LongTermMemory:
                 continue
 
             document = self.documents[index].copy()
+            metadata = document.get("metadata", {})
+            if metadata.get("expiration_date") and metadata["expiration_date"] < date.today().isoformat():
+                continue
             document["score"] = float(score)
             results.append(document)
+            if len(results) >= top_k:
+                break
 
         return results
     def _fallback_search(
@@ -369,6 +394,9 @@ class LongTermMemory:
         if not query_terms:
             return []
         for document in self.documents:
+            metadata = document.get("metadata", {})
+            if metadata.get("expiration_date") and metadata["expiration_date"] < date.today().isoformat():
+                continue
             content = document["content"].lower()
             hits = sum(
                 1

@@ -62,6 +62,7 @@ class TicketHandlerAgent:
                 arguments["reason"],
                 arguments["idempotency_key"],
                 arguments.get("session_id", ""),
+                arguments.get("application_type") or None,
             )
         if tool_name == "ticket_create":
             # LLM 可能多传无关字段，白名单过滤防止 TypeError。
@@ -116,6 +117,7 @@ class TicketHandlerAgent:
                     "如果用户没有提供订单号，请先询问订单号。"
                     "查询自己的订单列表时使用 order_list。"
                     "用户明确申请退款时使用 refund_apply；缺少订单号或用户提供的退款原因时先询问，绝不编造原因。"
+                    "仅当用户明确说明无理由或商品质量问题时，分别传入 application_type 的 no_reason 或 quality_issue；不确定时留空并转人工。"
                     "退款申请只是等待人工审核，不代表退款成功或资金已退回。"
                     "不要编造订单信息。"
                 )

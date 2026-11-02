@@ -111,6 +111,8 @@ export default function WorkbenchPanel() {
             <p>客户：{detail.refund.username || detail.refund.user_id}</p>
             <p>订单：{detail.refund.order_id}（{detail.refund.product}，¥{(detail.refund.amount_cents / 100).toFixed(2)}）</p>
             <p>退款原因：{detail.refund.reason}</p>
+            <p>申请类型：{({ no_reason: "无理由退货", quality_issue: "质量问题" })[detail.refund.application_type] || "待确认"}</p>
+            <p>规则判定：{detail.refund.policy_reason || "历史申请，未记录"} {detail.refund.policy_ref && `（${detail.refund.policy_ref}）`}</p>
             {detail.thread_paused && <p className="muted">Agent 流程已暂停在人工审核节点，等待你的决定。</p>}
             {detail.handoff && (
               <>

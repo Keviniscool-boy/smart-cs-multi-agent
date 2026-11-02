@@ -195,6 +195,7 @@ class ToolCallRequest(BaseModel):
 class RefundRequest(BaseModel):
     order_id: str
     reason: str
+    application_type: str | None = None
 
 
 class AuthRequest(BaseModel):
@@ -365,7 +366,7 @@ def refunds(current_user: dict = Depends(get_current_user)):
 
 @app.post("/api/refunds")
 def create_refund(request: RefundRequest, idempotency_key: str = Header(default="", alias="Idempotency-Key"), current_user: dict = Depends(get_current_user)):
-    result = apply_refund(current_user["id"], request.order_id, request.reason, idempotency_key)
+    result = apply_refund(current_user["id"], request.order_id, request.reason, idempotency_key, application_type=request.application_type)
     if "error" in result:
         code = 404 if result["error"] == "order_not_found" else 409 if result["error"] in {"refund_exists", "idempotency_conflict", "already_approved", "session_busy"} else 400
         raise HTTPException(status_code=code, detail=result)
@@ -690,6 +691,12 @@ async def _finalize_chat(
         response = "您的退款申请已提交人工审核，客服处理后将继续为您跟进。"
     elif not result["compliance_passed"]:
         response = "抱歉，该回答未通过合规审查，暂时无法提供详细信息。"
+    elif result.get("current_agent") == "knowledge_rag":
+        evidence = result.get("sub_results", {}).get("knowledge_rag_context", [])
+        references = [f"{item['source']}：{item['content']}" for item in evidence[:3]
+                      if item.get("source") and item.get("content")]
+        if references:
+            response += "\n\n参考片段：\n" + "\n".join(references)
 
     working_memory.update(
         session_id,
@@ -836,6 +843,7 @@ async def chat_stream(
             "current_agent": merged.get("current_agent", ""),
             "compliance_passed": merged.get("compliance_passed", False),
             "compliance_reason": merged.get("compliance_reason", ""),
+            "sub_results": merged.get("sub_results", {}),
             "__interrupt__": interrupted,
         }
         if result["__interrupt__"]:

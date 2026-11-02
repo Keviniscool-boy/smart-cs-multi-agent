@@ -638,7 +638,7 @@ def test_mismatched_refund_cannot_resume_another_paused_thread(api, monkeypatch,
     monkeypatch.setattr(api_main, "graph", graph)
     original = svc.list_refunds("user-a")[0]
     with sqlite3.connect(isolated_db) as db:
-        db.execute("INSERT INTO orders VALUES (?, ?, 'delivered', 100, ?, ?)",
+        db.execute("INSERT INTO orders (id, user_id, status, amount_cents, delivered_at, product) VALUES (?, ?, 'delivered', 100, ?, ?)",
                    ("another-order", "user-a", order["delivered_at"], "sample"))
     other = svc.apply_refund("user-a", "another-order", "reason", "other-key")
     with sqlite3.connect(isolated_db) as db:

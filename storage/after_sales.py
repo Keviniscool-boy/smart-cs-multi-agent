@@ -8,6 +8,8 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from storage.after_sales_policy import evaluate
+
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "after_sales.sqlite3"
 
 
@@ -81,6 +83,16 @@ def _connect():
             if "duplicate column name" not in str(exc).lower():
                 db.close()
                 raise
+    for table, column in (("orders", "product_type"), ("refund_requests", "application_type"),
+                          ("refund_requests", "policy_action"), ("refund_requests", "policy_reason"),
+                          ("refund_requests", "policy_ref")):
+        if column not in {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}:
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    db.close()
+                    raise
     outbox_columns = {row["name"] for row in db.execute("PRAGMA table_info(handoff_outbox)")}
     if "completed_at" not in outbox_columns:
         try:
@@ -124,25 +136,27 @@ def list_orders(user_id: str) -> list[dict]:
     with closing(_connect()) as db, db:
         for suffix, status, delivered in (("1", "delivered", (_now() - timedelta(days=1)).isoformat()),
                                            ("2", "cancelled", None)):
-            db.execute("INSERT OR IGNORE INTO orders VALUES (?, ?, ?, ?, ?, ?)",
-                       (f"DEMO-{prefix}-{suffix}", user_id, status, 29900, delivered, "演示商品"))
-        rows = db.execute("SELECT id AS order_id, status, amount_cents, delivered_at, product FROM orders WHERE user_id = ? ORDER BY id", (user_id,)).fetchall()
+            db.execute("INSERT OR IGNORE INTO orders (id, user_id, status, amount_cents, delivered_at, product, product_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (f"DEMO-{prefix}-{suffix}", user_id, status, 29900, delivered, "演示商品", "normal"))
+        rows = db.execute("SELECT id AS order_id, status, amount_cents, delivered_at, product, product_type FROM orders WHERE user_id = ? ORDER BY id", (user_id,)).fetchall()
     return [{**dict(row), "mock": True} for row in rows]
 
 
 def get_order(user_id: str, order_id: str) -> dict:
     with closing(_connect()) as db:
-        row = db.execute("SELECT id AS order_id, status, amount_cents, delivered_at, product FROM orders WHERE id = ? AND user_id = ?", (order_id, user_id)).fetchone()
+        row = db.execute("SELECT id AS order_id, status, amount_cents, delivered_at, product, product_type FROM orders WHERE id = ? AND user_id = ?", (order_id, user_id)).fetchone()
     return {**dict(row), "mock": True} if row else {"error": "order_not_found", "message": "订单不存在或无权访问"}
 
 
-def apply_refund(user_id: str, order_id: str, reason: str, idempotency_key: str, session_id: str = "") -> dict:
+def apply_refund(user_id: str, order_id: str, reason: str, idempotency_key: str, session_id: str = "", application_type: str | None = None) -> dict:
     reason = reason.strip()
     idempotency_key = idempotency_key.strip()
     if not reason or len(reason) > 500:
         return {"error": "invalid_reason", "message": "请填写不超过 500 字的退款原因"}
     if not idempotency_key or len(idempotency_key) > 128:
         return {"error": "invalid_idempotency_key", "message": "请提供不超过 128 字的幂等键"}
+    if application_type not in (None, "no_reason", "quality_issue"):
+        return {"error": "invalid_application_type", "message": "不支持的售后类型"}
     db = _connect()
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -150,22 +164,22 @@ def apply_refund(user_id: str, order_id: str, reason: str, idempotency_key: str,
         if not order:
             return {"error": "order_not_found", "message": "订单不存在或无权访问"}
         previous = db.execute(
-            "SELECT order_id, reason, refund_id FROM refund_idempotency WHERE user_id = ? AND request_key = ?",
+            "SELECT i.order_id, i.reason, i.refund_id, r.application_type FROM refund_idempotency i JOIN refund_requests r ON r.id = i.refund_id WHERE i.user_id = ? AND i.request_key = ?",
             (user_id, idempotency_key),
         ).fetchone()
         if previous:
-            if previous["order_id"] != order_id or previous["reason"] != reason:
+            if previous["order_id"] != order_id or previous["reason"] != reason or previous["application_type"] != application_type:
                 return {"error": "idempotency_conflict", "message": "该幂等键已用于其他请求"}
             saved = db.execute(
-                "SELECT r.id, r.order_id, r.reason, r.status, r.session_id, r.created_at, t.id AS ticket_id FROM refund_requests r LEFT JOIN refund_tickets t ON t.refund_id = r.id WHERE r.id = ? AND r.user_id = ?",
+                "SELECT r.id, r.order_id, r.reason, r.status, r.session_id, r.created_at, r.application_type, r.policy_action, r.policy_reason, r.policy_ref, t.id AS ticket_id FROM refund_requests r LEFT JOIN refund_tickets t ON t.refund_id = r.id WHERE r.id = ? AND r.user_id = ?",
                 (previous["refund_id"], user_id),
             ).fetchone()
             return {**dict(saved), "reused": True, "mock": True}
-        existing = db.execute("SELECT r.id, r.order_id, r.reason, r.status, r.session_id, r.created_at, t.id AS ticket_id FROM refund_requests r LEFT JOIN refund_tickets t ON t.refund_id = r.id WHERE r.order_id = ? AND r.user_id = ? AND r.status IN ('pending_review', 'approved', 'completed')", (order_id, user_id)).fetchone()
+        existing = db.execute("SELECT r.id, r.order_id, r.reason, r.status, r.session_id, r.created_at, r.application_type, r.policy_action, r.policy_reason, r.policy_ref, t.id AS ticket_id FROM refund_requests r LEFT JOIN refund_tickets t ON t.refund_id = r.id WHERE r.order_id = ? AND r.user_id = ? AND r.status IN ('pending_review', 'approved', 'completed')", (order_id, user_id)).fetchone()
         if existing:
             if existing["status"] != "pending_review":
                 return {"error": "already_approved", "message": "该订单已有通过审核的退款申请"}
-            if existing["reason"] != reason:
+            if existing["reason"] != reason or existing["application_type"] != application_type:
                 return {"error": "refund_exists", "message": "该订单已有退款申请，请查看原申请"}
             db.execute("INSERT INTO refund_idempotency VALUES (?, ?, ?, ?, ?)",
                        (user_id, idempotency_key, order_id, reason, existing["id"]))
@@ -176,17 +190,19 @@ def apply_refund(user_id: str, order_id: str, reason: str, idempotency_key: str,
             (session_id,),
         ).fetchone():
             return {"error": "session_busy", "message": "该会话已有等待人工审核的申请"}
-        if order["status"] != "delivered" or not order["delivered_at"]:
+        if order["status"] != "delivered":
             return {"error": "not_eligible", "message": "演示规则：只有已签收订单可以申请退款"}
-        elapsed = _now() - datetime.fromisoformat(order["delivered_at"])
-        if elapsed < timedelta(0):
-            return {"error": "not_eligible", "message": "演示订单签收时间无效，请联系人工客服"}
-        if elapsed > timedelta(days=7):
-            return {"error": "not_eligible", "message": "演示规则：签收超过 7 天不能申请退款"}
+        try:
+            signed_at = datetime.fromisoformat(order["delivered_at"]) if order["delivered_at"] else None
+        except (ValueError, TypeError):
+            signed_at = None
+        decision = evaluate(application_type, order["product_type"], signed_at, _now())
+        if decision.action == "reject":
+            return {"error": "not_eligible", "message": decision.reason, "policy_ref": decision.policy_ref}
         refund_id = "RF-" + uuid.uuid4().hex.upper()
         created = _now().isoformat()
-        db.execute("INSERT INTO refund_requests VALUES (?, ?, ?, ?, ?, ?, ?)",
-                   (refund_id, order_id, user_id, reason, "pending_review", created, session_id))
+        db.execute("INSERT INTO refund_requests (id, order_id, user_id, reason, status, created_at, session_id, application_type, policy_action, policy_reason, policy_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (refund_id, order_id, user_id, reason, "pending_review", created, session_id, application_type, decision.action, decision.reason, decision.policy_ref))
         ticket_id = "TK-" + uuid.uuid4().hex.upper()
         db.execute("INSERT INTO refund_tickets VALUES (?, ?, ?, ?, ?)",
                    (ticket_id, refund_id, user_id, "pending", created))
@@ -194,7 +210,8 @@ def apply_refund(user_id: str, order_id: str, reason: str, idempotency_key: str,
                    (user_id, idempotency_key, order_id, reason, refund_id))
         db.commit()
         return {"id": refund_id, "order_id": order_id, "reason": reason, "session_id": session_id,
-                "ticket_id": ticket_id, "status": "pending_review", "created_at": created, "reused": False, "mock": True}
+                "ticket_id": ticket_id, "status": "pending_review", "created_at": created, "reused": False, "mock": True,
+                "application_type": application_type, "policy_action": decision.action, "policy_reason": decision.reason, "policy_ref": decision.policy_ref}
     finally:
         db.close()
 
@@ -256,7 +273,7 @@ def list_refund_reviews() -> list[dict]:
     with closing(_connect()) as db:
         rows = db.execute(
             """
-            SELECT r.id, r.order_id, r.user_id, r.reason, r.status,
+            SELECT r.id, r.order_id, r.user_id, r.reason, r.status, r.application_type, r.policy_action, r.policy_reason, r.policy_ref,
                    r.session_id, r.created_at, t.id AS ticket_id, t.status AS ticket_status,
                    o.status AS order_status, o.amount_cents, o.product
             FROM refund_requests r
@@ -273,7 +290,7 @@ def get_refund_review(refund_id: str) -> dict | None:
     with closing(_connect()) as db:
         row = db.execute(
             """
-            SELECT r.id, r.order_id, r.user_id, r.reason, r.status,
+            SELECT r.id, r.order_id, r.user_id, r.reason, r.status, r.application_type, r.policy_action, r.policy_reason, r.policy_ref,
                    r.session_id, r.created_at, t.id AS ticket_id, t.status AS ticket_status,
                    o.status AS order_status, o.amount_cents, o.product
             FROM refund_requests r

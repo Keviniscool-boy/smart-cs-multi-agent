@@ -3,6 +3,7 @@ uvicorn
 pydantic
 PyJWT
 python-dotenv   
+pyyaml
 langchain
 langchain-openai
 langchain-community
