@@ -35,25 +35,20 @@ async def order_list(user_id: str = "", request_id: str = "") -> dict:
 
 
 @server.tool(name="refund_apply", description="为自己的演示订单提交退款申请；需要订单号和用户提供的退款原因，不执行支付")
-async def refund_apply(order_id: str, reason: str, user_id: str = "", request_id: str = "", idempotency_key: str = "", session_id: str = "") -> dict:
-    return await asyncio.to_thread(apply_refund, user_id, order_id, reason, idempotency_key, session_id)
+async def refund_apply(order_id: str, reason: str, application_type: str = "", user_id: str = "", request_id: str = "", idempotency_key: str = "", session_id: str = "") -> dict:
+    """application_type is no_reason or quality_issue when explicitly known."""
+    return await asyncio.to_thread(apply_refund, user_id, order_id, reason, idempotency_key, session_id, application_type or None)
 
 @server.tool(
     name="knowledge_search",
-    description="搜索企业知识库，返回相关文档片段（mock 模板数据，演示用）",
+    description="知识库检索请使用客服知识问答流程",
 )
 async def knowledge_search(
     query:str,
     top_k: int =3,
 
 )->list[dict]:
-    return[
-        {
-            "content":f"关于'{query}'的知识库文档片段",
-            "source":f"FAQ.md",
-            "score":0.95,
-        }
-    ]
+    return [{"error": "knowledge_unavailable", "message": "请通过知识库问答查询已发布的政策"}]
 
 
 @server.tool(

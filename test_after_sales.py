@@ -100,12 +100,16 @@ def test_cancelled_order_is_ineligible(isolated_db):
     assert svc.apply_refund("user-a", order["order_id"], "退款", "key")["error"] == "not_eligible"
 
 
-@pytest.mark.parametrize("days", [8, -1])
-def test_delivery_outside_valid_time_is_ineligible(isolated_db, order, days):
+@pytest.mark.parametrize("days,expected", [(8, "reject"), (-1, "manual_review")])
+def test_delivery_outside_valid_time(isolated_db, order, days, expected):
     timestamp = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with sqlite3.connect(isolated_db) as db:
         db.execute("UPDATE orders SET delivered_at = ? WHERE id = ?", (timestamp, order["order_id"]))
-    assert svc.apply_refund("user-a", order["order_id"], "退款", "key")["error"] == "not_eligible"
+    result = svc.apply_refund("user-a", order["order_id"], "退款", "key", application_type="no_reason")
+    if expected == "reject":
+        assert result["error"] == "not_eligible"
+    else:
+        assert result["policy_action"] == "manual_review"
 
 
 def test_exact_seven_day_boundary_is_allowed(isolated_db, order, monkeypatch):

@@ -9,6 +9,7 @@ export default function AfterSales() {
   const [refunds, setRefunds] = useState([]);
   const [selected, setSelected] = useState("");
   const [reason, setReason] = useState("");
+  const [applicationType, setApplicationType] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -37,12 +38,13 @@ export default function AfterSales() {
       const result = await api("/api/refunds", {
         method: "POST",
         headers: { "Idempotency-Key": requestKey.current },
-        body: JSON.stringify({ order_id: selected, reason: reason.trim() }),
+        body: JSON.stringify({ order_id: selected, reason: reason.trim(), application_type: applicationType || null }),
       });
       setNotice(result.reused ? "已返回现有退款申请。" : "申请已提交，等待人工审核。" );
       requestKey.current = "";
       setSelected("");
       setReason("");
+      setApplicationType("");
       await refresh();
     } catch (err) {
       setError(err.message);
@@ -98,14 +100,15 @@ export default function AfterSales() {
         <div className="after-sales-list">
           {orders.map((order) => <article className="after-sales-row" key={order.order_id}>
             <div><strong>{order.product}</strong><p>{order.order_id}</p><span>{orderStatus[order.status] || order.status} · ¥{(order.amount_cents / 100).toFixed(2)}</span></div>
-            <button className="text-button" disabled={busy || order.status !== "delivered"} onClick={() => { requestKey.current = crypto.randomUUID(); setSelected(order.order_id); setReason(""); setError(""); setNotice(""); }}>申请退款</button>
+            <button className="text-button" disabled={busy || order.status !== "delivered"} onClick={() => { requestKey.current = crypto.randomUUID(); setSelected(order.order_id); setReason(""); setApplicationType(""); setError(""); setNotice(""); }}>申请退款</button>
           </article>)}
           {orders.length === 0 && <p className="muted">暂无订单</p>}
         </div>
         {selected && <form className="after-sales-form" onSubmit={submit}>
           <h3>退款申请</h3>
           <p>订单：{selected}</p>
-          <p className="muted">演示规则：签收后 7 天内可申请，商品状态与包装需人工审核。</p>
+          <label>售后类型<select required value={applicationType} onChange={(event) => { setApplicationType(event.target.value); requestKey.current = crypto.randomUUID(); }}><option value="">请选择</option><option value="no_reason">无理由退货</option><option value="quality_issue">商品质量问题</option></select></label>
+          <p className="muted">普通商品无理由退货须在签收后 7 天内申请；质量问题由客服审核。</p>
           <label>退款原因<textarea required maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} rows={3} /></label>
           <div className="after-sales-actions"><button className="primary" disabled={busy || !reason.trim()}>提交申请</button><button type="button" className="text-button" onClick={() => setSelected("")} disabled={busy}>取消</button></div>
         </form>}
